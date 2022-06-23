@@ -1,30 +1,23 @@
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
 
-mod path;
+pub use color::Color;
+use defs::*;
+use glyphs::GlyphCache;
+use gpu_vec::*;
+use paint::*;
 use path::*;
-
-mod scene;
+use prim::*;
 use scene::*;
 
-mod prim;
-use prim::*;
-
-pub mod defs;
-use defs::*;
-
-mod paint;
-use paint::*;
-
-mod gpu_vec;
-use gpu_vec::*;
-
-pub mod color;
-pub use color::Color;
-
 mod atlas;
-
+pub mod color;
+pub mod defs;
 mod glyphs;
-use glyphs::GlyphCache;
+mod gpu_vec;
+mod paint;
+mod path;
+mod prim;
+mod scene;
 
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
@@ -370,12 +363,14 @@ impl Vger {
     /// Strokes a rectangle.
     pub fn stroke_rect(
         &mut self,
-        min: LocalPoint,
-        max: LocalPoint,
+        min: impl Into<LocalPoint>,
+        max: impl Into<LocalPoint>,
         radius: f32,
         width: f32,
         paint_index: PaintIndex,
     ) {
+        let min = min.into();
+        let max = max.into();
         let mut prim = Prim::default();
         prim.prim_type = PrimType::RectStroke as u32;
         prim.cvs[0] = min.x;
@@ -461,6 +456,10 @@ impl Vger {
         self.pen = p.into();
     }
 
+    pub fn pen(&mut self) -> LocalPoint {
+        self.pen
+    }
+
     /// Makes a quadratic curve to a point (path fills only)
     pub fn quad_to<Pt: Into<LocalPoint>>(&mut self, b: Pt, c: Pt) {
         let cp: LocalPoint = c.into();
@@ -513,6 +512,8 @@ impl Vger {
 
             self.render(prim);
         }
+
+        self.path_scanner.segments.clear();
     }
 
     fn setup_layout(&mut self, text: &str, size: u32, max_width: Option<f32>) {
@@ -693,6 +694,27 @@ impl Vger {
         if let Some(m) = self.tx_stack.last_mut() {
             *m = (*m).pre_translate(offset.into());
         }
+    }
+
+    /// Scales the coordinate system.
+    pub fn scale(&mut self, scale: impl Into<LocalVector>) {
+        if let Some(m) = self.tx_stack.last_mut() {
+            let scale = scale.into();
+            *m = (*m).pre_scale(scale.x, scale.y);
+        }
+    }
+
+    /// Rotates the coordinate system.
+    pub fn rotate(&mut self, theta: f32) {
+        if let Some(m) = self.tx_stack.last_mut() {
+            *m = (*m).pre_rotate(euclid::Angle::radians(theta));
+        }
+    }
+
+    /// Transforms a point according to the current transformation.
+    pub fn transform(&mut self, point: impl Into<LocalPoint>) -> WorldPoint {
+        let tx = self.tx_stack.last().unwrap();
+        tx.transform_point(point.into())
     }
 
     fn add_paint(&mut self, paint: Paint) -> PaintIndex {
