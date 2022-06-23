@@ -42,6 +42,16 @@ impl Color {
         }
     }
 
+    pub fn dim(&self, amount: f32) -> Self {
+        let dim = (1. - amount).clamp(0., 1.);
+        Self {
+            r: self.r * dim,
+            g: self.g * dim,
+            b: self.b * dim,
+            a: self.a,
+        }
+    }
+
     pub const CYAN: Color = Color {
         r: 0.0,
         g: 1.0,
