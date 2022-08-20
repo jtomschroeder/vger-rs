@@ -64,7 +64,10 @@ async fn create_png(
 ) {
     // Note that we're not calling `.await` here.
     let buffer_slice = output_buffer.slice(..);
-    let buffer_future = buffer_slice.map_async(wgpu::MapMode::Read);
+
+    // Sets the buffer up for mapping, sending over the result of the mapping back to us when it is finished.
+    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
 
     // Poll the device in a blocking manner so that our future resolves.
     // In an actual application, `device.poll(...)` should
@@ -76,7 +79,7 @@ async fn create_png(
         return;
     }
 
-    if let Ok(()) = buffer_future.await {
+    if let Some(Ok(())) = receiver.receive().await {
         let padded_buffer = buffer_slice.get_mapped_range();
 
         let mut png_encoder = png::Encoder::new(
@@ -145,14 +148,14 @@ fn render_test(
 
     let desc = wgpu::RenderPassDescriptor {
         label: None,
-        color_attachments: &[wgpu::RenderPassColorAttachment {
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &view,
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                 store: true,
             },
-        }],
+        })],
         depth_stencil_attachment: None,
     };
 
@@ -201,6 +204,40 @@ fn render_test(
     block_on(create_png(name, device, output_buffer, &buffer_dimensions));
 }
 
+fn png_not_black(path: &str) -> bool {
+
+    let decoder = png::Decoder::new(
+        File::open(path).unwrap()
+    );
+
+    let (info, mut reader) = match decoder.read_info() {
+        Ok(result) => result,
+        Err(decoding_error) => {
+            println!("error: {:?}", decoding_error);
+            return false;
+        }
+    };
+
+    // Allocate the output buffer.
+    let mut buf = vec![0; reader.output_buffer_size()];
+    // Read the next frame. An APNG might contain multiple frames.
+    reader.next_frame(&mut buf).unwrap();
+    // Grab the bytes of the image.
+    let bytes = &buf[..info.buffer_size()];
+
+    let mut i = 0;
+    for b in bytes {
+        // Skip alpha values.
+        if (i % 4 != 3) && (*b != 0) {
+            return true;
+        }
+        i += 1;
+    }
+
+    false
+    
+}
+
 #[test]
 fn test_color_hex() {
     let c = Color::hex("#00D4FF").unwrap();
@@ -230,6 +267,8 @@ fn fill_circle() {
     vger.fill_circle([100.0, 100.0], 20.0, cyan);
 
     render_test(&mut vger, &device, &queue, "circle.png", false);
+
+    assert!(png_not_black("circle.png"));
 }
 
 #[test]
@@ -438,7 +477,9 @@ fn path_fill() {
     vger.quad_to(rand2(&mut rng), start);
     vger.fill(paint);
 
-    render_test(&mut vger, &device, &queue, "path_fill.png", true);
+    let png_name = "path_fill.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
 }
 
 #[test]
@@ -452,7 +493,9 @@ fn text() {
     vger.translate([32.0, 256.0]);
     vger.text("This is a test", 32, Color::CYAN, None);
 
-    render_test(&mut vger, &device, &queue, "text.png", true);
+    let png_name = "text.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
 }
 
 #[test]
@@ -466,7 +509,9 @@ fn text_small() {
     vger.translate([32.0, 256.0]);
     vger.text("53", 18, Color::CYAN, None);
 
-    render_test(&mut vger, &device, &queue, "text_small.png", true);
+    let png_name = "text_small.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
 }
 
 #[test]
@@ -480,7 +525,9 @@ fn text_scale() {
     vger.translate([32.0, 256.0]);
     vger.text("This is a test", 32, Color::CYAN, None);
 
-    render_test(&mut vger, &device, &queue, "text_scale.png", true);
+    let png_name = "text_scale.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
 }
 
 #[test]
@@ -503,5 +550,51 @@ fn text_box() {
 
     vger.text(lorem, 18, Color::CYAN, Some(448.0));
 
-    render_test(&mut vger, &device, &queue, "text_box.png", true);
+    let png_name = "text_box.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
+}
+
+#[test]
+fn test_scissor() {
+
+    let (device, queue) = block_on(setup());
+
+    let mut vger = Vger::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    vger.begin(512.0, 512.0, 2.0);
+
+    vger.scissor(euclid::rect(200.0, 200.0, 100.0, 100.0));
+    let cyan = vger.color_paint(Color::CYAN);
+    vger.fill_rect(euclid::rect(100.0, 100.0, 300.0, 300.0), 10.0, cyan);
+
+    let png_name = "scissor.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
+}
+
+#[test]
+fn test_scissor_text() {
+    let (device, queue) = block_on(setup());
+
+    let mut vger = Vger::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+
+    vger.begin(512.0, 512.0, 1.0);
+
+    let paint = vger.linear_gradient([0.0, 0.0], [512.0, 512.0], Color::CYAN, Color::MAGENTA, 0.0);
+
+    let lorem = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
+
+    vger.translate([32.0, 256.0]);
+    vger.scissor(euclid::rect(-100.0, -100.0, 400.0, 400.0));
+
+    let bounds = vger.text_bounds(lorem, 18, Some(448.0));
+
+    vger.stroke_rect(bounds.origin, bounds.max(), 10.0, 4.0, paint);
+
+    vger.text(lorem, 18, Color::CYAN, Some(448.0));
+
+    let png_name = "text_box_scissor.png";
+    render_test(&mut vger, &device, &queue, png_name, true);
+    assert!(png_not_black(png_name));
 }

@@ -37,11 +37,30 @@ pub struct LineMetrics {
     pub bounds: LocalRect,
 }
 
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub(crate) struct Scissor {
+    pub xform: WorldToLocal,
+    pub origin: [f32; 2],
+    pub size: [f32; 2],
+}
+
+impl Scissor {
+    fn new() -> Self {
+        Self {
+            xform: WorldToLocal::identity(),
+            origin: [-10000.0, -10000.0],
+            size: [20000.0, 20000.0],
+        }
+    }
+}
+
 pub struct Vger {
     scenes: [Scene; 3],
     cur_scene: usize,
     cur_layer: usize,
     tx_stack: Vec<LocalToWorld>,
+    scissor_stack: Vec<Scissor>,
     device_px_ratio: f32,
     screen_size: ScreenSize,
     paint_count: usize,
@@ -49,6 +68,7 @@ pub struct Vger {
     uniform_bind_group: wgpu::BindGroup,
     uniforms: GPUVec<Uniforms>,
     xform_count: usize,
+    scissor_count: usize,
     path_scanner: PathScanner,
     pen: LocalPoint,
     glyph_cache: GlyphCache,
@@ -58,7 +78,7 @@ pub struct Vger {
 impl Vger {
     /// Create a new renderer given a device and output pixel format.
     pub fn new(device: &wgpu::Device, texture_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(&wgpu::ShaderModuleDescriptor {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
                 "shader.wgsl"
@@ -159,14 +179,14 @@ impl Vger {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: "fs_main",
-                targets: &[wgpu::ColorTargetState {
+                targets: &[Some(wgpu::ColorTargetState {
                     format: texture_format,
                     blend: Some(wgpu::BlendState {
                         color: blend_comp,
                         alpha: blend_comp,
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
-                }],
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 cull_mode: None,
@@ -185,6 +205,7 @@ impl Vger {
             cur_scene: 0,
             cur_layer: 0,
             tx_stack: vec![],
+            scissor_stack: vec![],
             device_px_ratio: 1.0,
             screen_size: ScreenSize::new(512.0, 512.0),
             paint_count: 0,
@@ -192,6 +213,7 @@ impl Vger {
             uniforms,
             uniform_bind_group,
             xform_count: 0,
+            scissor_count: 0,
             path_scanner: PathScanner::new(),
             pen: LocalPoint::zero(),
             glyph_cache,
@@ -204,27 +226,32 @@ impl Vger {
         self.device_px_ratio = device_px_ratio;
         self.cur_layer = 0;
         self.screen_size = ScreenSize::new(window_width, window_height);
-        self.uniforms.data.clear();
-        self.uniforms.data.push(Uniforms {
+        self.uniforms.clear();
+        self.uniforms.push(Uniforms {
             size: [window_width, window_height],
         });
         self.cur_scene = (self.cur_scene + 1) % 3;
         self.scenes[self.cur_scene].clear();
         self.tx_stack.clear();
         self.tx_stack.push(LocalToWorld::identity());
+        self.scissor_stack.clear();
+        self.scissor_stack.push(Scissor::new());
         self.paint_count = 0;
         self.xform_count = 0;
+        self.scissor_count = 0;
         self.pen = LocalPoint::zero();
     }
 
-    /// Saves rendering state (just the current transform).
+    /// Saves rendering state (transform and scissor rect).
     pub fn save(&mut self) {
-        self.tx_stack.push(*self.tx_stack.last().unwrap())
+        self.tx_stack.push(*self.tx_stack.last().unwrap());
+        self.scissor_stack.push(*self.scissor_stack.last().unwrap());
     }
 
-    /// Restores rendering state (just the current transform).
+    /// Restores rendering state (transform and scissor rect).
     pub fn restore(&mut self) {
         self.tx_stack.pop();
+        self.scissor_stack.pop();
     }
 
     /// Encode all rendering to a command buffer.
@@ -234,8 +261,8 @@ impl Vger {
         render_pass: &wgpu::RenderPassDescriptor,
         queue: &wgpu::Queue,
     ) {
-        self.scenes[self.cur_scene].update(queue);
-        self.uniforms.update(queue);
+        self.scenes[self.cur_scene].update(device, queue);
+        self.uniforms.update(device, queue);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("vger encoder"),
@@ -256,7 +283,7 @@ impl Vger {
 
             rpass.set_bind_group(1, &self.uniform_bind_group, &[]);
 
-            let n = self.scenes[self.cur_scene].prims[self.cur_layer].data.len();
+            let n = self.scenes[self.cur_scene].prims[self.cur_layer].len();
             // println!("encoding {:?} prims", n);
 
             rpass.draw(/*vertices*/ 0..4, /*instances*/ 0..(n as u32))
@@ -273,9 +300,7 @@ impl Vger {
     }
 
     fn render(&mut self, prim: Prim) {
-        self.scenes[self.cur_scene].prims[self.cur_layer]
-            .data
-            .push(prim);
+        self.scenes[self.cur_scene].prims[self.cur_layer].push(prim);
     }
 
     /// Fills a circle.
@@ -295,6 +320,7 @@ impl Vger {
         prim.quad_bounds = [c.x - radius, c.y - radius, c.x + radius, c.y + radius];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -331,6 +357,7 @@ impl Vger {
         ];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -356,6 +383,7 @@ impl Vger {
         prim.quad_bounds = [min.x, min.y, max.x, max.y];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -383,6 +411,7 @@ impl Vger {
         prim.quad_bounds = [min.x - width, min.y - width, max.x + width, max.y + width];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -413,6 +442,7 @@ impl Vger {
         ];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -447,6 +477,7 @@ impl Vger {
         ];
         prim.tex_bounds = prim.quad_bounds;
         prim.xform = self.add_xform() as u32;
+        prim.scissor = self.add_scissor() as u32;
 
         self.render(prim);
     }
@@ -470,12 +501,13 @@ impl Vger {
     }
 
     fn add_cv<Pt: Into<LocalPoint>>(&mut self, p: Pt) {
-        self.scenes[self.cur_scene].cvs.data.push(p.into())
+        self.scenes[self.cur_scene].cvs.push(p.into())
     }
 
     /// Fills a path.
     pub fn fill(&mut self, paint_index: PaintIndex) {
         let xform = self.add_xform();
+        let scissor = self.add_scissor();
 
         self.path_scanner.init();
 
@@ -484,7 +516,8 @@ impl Vger {
             prim.prim_type = PrimType::PathFill as u32;
             prim.paint = paint_index.index as u32;
             prim.xform = xform as u32;
-            prim.start = self.scenes[self.cur_scene].cvs.data.len() as u32;
+            prim.scissor = scissor as u32;
+            prim.start = self.scenes[self.cur_scene].cvs.len() as u32;
 
             let mut x_interval = Interval {
                 a: std::f32::MAX,
@@ -543,6 +576,7 @@ impl Vger {
 
         let paint = self.color_paint(color);
         let xform = self.add_xform() as u32;
+        let scissor = self.add_scissor() as u32;
 
         let mut i = 0;
         let mut prims = vec![];
@@ -555,6 +589,7 @@ impl Vger {
                 let mut prim = Prim::default();
                 prim.prim_type = PrimType::Glyph as u32;
                 prim.xform = xform;
+                prim.scissor = scissor;
                 assert!(glyph.width == rect.width as usize);
                 assert!(glyph.height == rect.height as usize);
 
@@ -680,10 +715,20 @@ impl Vger {
             let m = *self.tx_stack.last().unwrap();
             self.scenes[self.cur_scene]
                 .xforms
-                .data
                 .push(m.to_3d().to_array());
             let n = self.xform_count;
             self.xform_count += 1;
+            return n;
+        }
+        0
+    }
+
+    fn add_scissor(&mut self) -> usize {
+        if self.scissor_count < MAX_PRIMS {
+            let scissor = *self.scissor_stack.last().unwrap();
+            self.scenes[self.cur_scene].scissors.push(scissor);
+            let n = self.scissor_count;
+            self.scissor_count += 1;
             return n;
         }
         0
@@ -697,17 +742,36 @@ impl Vger {
     }
 
     /// Scales the coordinate system.
-    pub fn scale(&mut self, scale: impl Into<LocalVector>) {
+    pub fn scale<Vec: Into<LocalVector>>(&mut self, scale: Vec) {
         if let Some(m) = self.tx_stack.last_mut() {
-            let scale = scale.into();
-            *m = (*m).pre_scale(scale.x, scale.y);
+            let s: LocalVector = scale.into();
+            *m = (*m).pre_scale(s.x, s.y);
         }
     }
 
     /// Rotates the coordinate system.
     pub fn rotate(&mut self, theta: f32) {
         if let Some(m) = self.tx_stack.last_mut() {
-            *m = (*m).pre_rotate(euclid::Angle::radians(theta));
+            *m = m.pre_rotate(euclid::Angle::<f32>::radians(theta));
+        }
+    }
+
+    /// Sets the current scissor rect.
+    pub fn scissor(&mut self, rect: LocalRect) {
+        if let Some(m) = self.scissor_stack.last_mut() {
+            *m = Scissor::new();
+            if let Some(xform) = self.tx_stack.last().unwrap().inverse() {
+                m.xform = xform;
+                m.origin = rect.origin.to_array();
+                m.size = rect.size.to_array();
+            }
+        }
+    }
+
+    /// Resets the current scissor rect.
+    pub fn reset_scissor(&mut self) {
+        if let Some(m) = self.scissor_stack.last_mut() {
+            *m = Scissor::new();
         }
     }
 
@@ -719,7 +783,7 @@ impl Vger {
 
     fn add_paint(&mut self, paint: Paint) -> PaintIndex {
         if self.paint_count < MAX_PRIMS {
-            self.scenes[self.cur_scene].paints.data.push(paint);
+            self.scenes[self.cur_scene].paints.push(paint);
             self.paint_count += 1;
             return PaintIndex {
                 index: self.paint_count - 1,
@@ -728,10 +792,12 @@ impl Vger {
         PaintIndex { index: 0 }
     }
 
+    /// Solid color paint.
     pub fn color_paint(&mut self, color: Color) -> PaintIndex {
         self.add_paint(Paint::solid_color(color))
     }
 
+    /// Linear gradient paint.
     pub fn linear_gradient<Pt: Into<LocalPoint>>(
         &mut self,
         start: Pt,

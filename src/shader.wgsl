@@ -33,41 +33,47 @@ let vgerPathFill = 9;
 struct Prim {
 
     /// Min and max coordinates of the quad we're rendering.
-    quad_bounds_min: vec2<f32>;
-    quad_bounds_max: vec2<f32>;
+    quad_bounds_min: vec2<f32>,
+    quad_bounds_max: vec2<f32>,
 
     /// Index of transform applied to drawing region.
-    xform: u32;
+    xform: u32,
 
     /// Type of primitive.
-    prim_type: u32;
+    prim_type: u32,
 
     /// Stroke width.
-    width: f32;
+    width: f32,
 
     /// Radius of circles. Corner radius for rounded rectangles.
-    radius: f32;
+    radius: f32,
 
     /// Control vertices.
-    cv0: vec2<f32>;
-    cv1: vec2<f32>;
-    cv2: vec2<f32>;
+    cv0: vec2<f32>,
+    cv1: vec2<f32>,
+    cv2: vec2<f32>,
 
     /// Start of the control vertices, if they're in a separate buffer.
-    start: u32;
+    start: u32,
 
     /// Number of control vertices (vgerCurve and vgerPathFill)
-    count: u32;
+    count: u32,
 
     /// Index of paint applied to drawing region.
-    paint: u32;
+    paint: u32,
 
     /// Glyph region index.
-    glyph: u32;
+    glyph: u32,
 
     /// Min and max coordinates in texture space.
-    tex_bounds_min: vec2<f32>;
-    tex_bounds_max: vec2<f32>;
+    tex_bounds_min: vec2<f32>,
+    tex_bounds_max: vec2<f32>,
+
+    /// Index of scissor rectangle.
+    scissor: u32,
+
+    /// Alignment padding.
+    pad: u32,
 
 };
 
@@ -261,8 +267,8 @@ fn sdBezierApprox2(p: vec2<f32>, A: vec2<f32>, B: vec2<f32>, C: vec2<f32>) -> f3
 }
 
 struct BBox {
-    min: vec2<f32>;
-    max: vec2<f32>;
+    min: vec2<f32>,
+    max: vec2<f32>,
 };
 
 fn expand(box: BBox, p: vec2<f32>) -> BBox {
@@ -273,62 +279,64 @@ fn expand(box: BBox, p: vec2<f32>) -> BBox {
 }
 
 struct Prims {
-    prims: array<Prim>;
+    prims: array<Prim>,
 };
 
-[[group(0), binding(0)]]
+@group(0)
+@binding(0)
 var<storage> prims: Prims;
 
 struct CVS {
-    cvs: array<vec2<f32>>;
+    cvs: array<vec2<f32>>,
 };
 
-[[group(0), binding(1)]]
+@group(0)
+@binding(1)
 var<storage> cvs: CVS;
 
 fn sdPrimBounds(prim: Prim) -> BBox {
     var b: BBox;
     switch (prim.prim_type) {
-        case 0: { // vgerCircle
+        case 0u: { // vgerCircle
             b.min = prim.cv0 - prim.radius;
             b.max = prim.cv0 + prim.radius;
         }
-        case 1: { // vgerArc
+        case 1u: { // vgerArc
             b.min = prim.cv0 - prim.radius;
             b.max = prim.cv0 + prim.radius;
         }
-        case 2: { // vgerRect
+        case 2u: { // vgerRect
             b.min = prim.cv0;
             b.max = prim.cv1;
         }
-        case 3: { // vgerRectStroke
+        case 3u: { // vgerRectStroke
             b.min = prim.cv0;
             b.max = prim.cv1;
         }
-        case 4: { // vgerBezier
+        case 4u: { // vgerBezier
             b.min = min(min(prim.cv0, prim.cv1), prim.cv2);
             b.max = max(max(prim.cv0, prim.cv1), prim.cv2);
         }
-        case 5: { // vgerSegment
+        case 5u: { // vgerSegment
             b.min = min(prim.cv0, prim.cv1);
             b.max = max(prim.cv0, prim.cv1);
         }
-        case 6: { // vgerCurve
+        case 6u: { // vgerCurve
             b.min = vec2<f32>(1e10, 1e10);
             b.max = -b.min;
             for(var i: i32 = 0; i < i32(prim.count * 3u); i = i+1) {
                 b = expand(b, cvs.cvs[i32(prim.start)+i]);
             }
         }
-        case 7: { // vgerSegment
+        case 7u: { // vgerSegment
             b.min = min(prim.cv0, prim.cv1);
             b.max = max(prim.cv0, prim.cv1);
         }
-        case 8: { // vgerGlyph
+        case 8u: { // vgerGlyph
             b.min = prim.cv0;
             b.max = prim.cv1;
         }
-        case 9: { // vgerPathFill
+        case 9u: { // vgerPathFill
             b.min = vec2<f32>(1e10, 1e10);
             b.max = -b.min;
             for(var i: i32 = 0; i < i32(prim.count * 3u); i = i+1) {
@@ -381,43 +389,43 @@ fn sdPrim(prim: Prim, p: vec2<f32>, filterWidth: f32) -> f32 {
     var d = 1e10;
     var s = 1.0;
     switch(prim.prim_type) {
-        case 0: { // vgerCircle
+        case 0u: { // vgerCircle
             d = sdCircle(p - prim.cv0, prim.radius);
         }
-        case 1: { // vgerArc
+        case 1u: { // vgerArc
             d = sdArc2(p - prim.cv0, prim.cv1, prim.cv2, prim.radius, prim.width/2.0);
         }
-        case 2: { // vgerRect
+        case 2u: { // vgerRect
             let center = 0.5*(prim.cv1 + prim.cv0);
             let size = prim.cv1 - prim.cv0;
             d = sdBox(p - center, 0.5*size, prim.radius);
         }
-        case 3: { // vgerRectStroke
+        case 3u: { // vgerRectStroke
             let center = 0.5*(prim.cv1 + prim.cv0);
             let size = prim.cv1 - prim.cv0;
             d = abs(sdBox(p - center, 0.5*size, prim.radius)) - prim.width/2.0;
         }
-        case 4: { // vgerBezier
+        case 4u: { // vgerBezier
             d = sdBezierApprox(p, prim.cv0, prim.cv1, prim.cv2) - prim.width;
         }
-        case 5: { // vgerSegment
+        case 5u: { // vgerSegment
             d = sdSegment2(p, prim.cv0, prim.cv1, prim.width);
         }
-        case 6: { // vgerCurve
+        case 6u: { // vgerCurve
             for(var i=0; i<i32(prim.count); i = i+1) {
                 let j = i32(prim.start) + 3*i;
                 d = min(d, sdBezierApprox(p, cvs.cvs[j], cvs.cvs[j+1], cvs.cvs[j+2]));
             }
         }
-        case 7: { // vgerSegment
+        case 7u: { // vgerSegment
             d = sdSegment2(p, prim.cv0, prim.cv1, prim.width);
         }
-        case 8: { // vgerGlyph
+        case 8u: { // vgerGlyph
             let center = 0.5*(prim.cv1 + prim.cv0);
             let size = prim.cv1 - prim.cv0;
             d = sdBox(p - center, 0.5*size, prim.radius);
         }
-        case 9: { // vgerPathFill
+        case 9u: { // vgerPathFill
             for(var i=0; i<i32(prim.count); i = i+1) {
                 let j = i32(prim.start) + 3*i;
                 let a = cvs.cvs[j];
@@ -461,29 +469,36 @@ fn sdPrim(prim: Prim, p: vec2<f32>, filterWidth: f32) -> f32 {
 }
 
 struct XForms {
-    xforms: array<mat4x4<f32>>;
+    xforms: array<mat4x4<f32>>,
 };
 
-[[group(0), binding(2)]]
+@group(0)
+@binding(2)
 var<storage> xforms: XForms;
 
 struct VertexOutput {
-    [[builtin(position)]] position: vec4<f32>;
-    [[location(0)]] prim_index: u32;
-    [[location(1)]] t: vec2<f32>;
+    @builtin(position) position: vec4<f32>,
+    @location(0) prim_index: u32,
+
+    /// Texture space point.
+    @location(1) t: vec2<f32>,
+
+    /// Point transformed by current transform.
+    @location(2) p: vec2<f32>,
 };
 
 struct Uniforms {
-    size: vec2<f32>;
+    size: vec2<f32>,
 };
 
-[[group(1), binding(0)]]
+@group(1)
+@binding(0)
 var<uniform> uniforms: Uniforms;
 
-[[stage(vertex)]]
+@vertex
 fn vs_main(
-    [[builtin(vertex_index)]] vid: u32,
-    [[builtin(instance_index)]] instance: u32
+    @builtin(vertex_index) vid: u32,
+    @builtin(instance_index) instance: u32
 ) -> VertexOutput {
     var out: VertexOutput;
     out.prim_index = instance;
@@ -515,19 +530,19 @@ fn vs_main(
         default: { }
     }
 
-    var p = (xforms.xforms[prim.xform] * vec4<f32>(q, 0.0, 1.0)).xy;
-    out.position = vec4<f32>(2.0 * p / uniforms.size - 1.0, 0.0, 1.0);
+    out.p = (xforms.xforms[prim.xform] * vec4<f32>(q, 0.0, 1.0)).xy;
+    out.position = vec4<f32>(2.0 * out.p / uniforms.size - 1.0, 0.0, 1.0);
 
     return out;
 }
 
 struct PackedMat3x2 {
-    m11: f32;
-    m12: f32;
-    m21: f32;
-    m22: f32;
-    m31: f32;
-    m32: f32;
+    m11: f32,
+    m12: f32,
+    m21: f32,
+    m22: f32,
+    m31: f32,
+    m32: f32,
 };
 
 fn unpack_mat3x2(m: PackedMat3x2) -> mat3x2<f32> {
@@ -535,18 +550,19 @@ fn unpack_mat3x2(m: PackedMat3x2) -> mat3x2<f32> {
 }
 
 struct Paint {              // align  size
-    xform: PackedMat3x2;    // 8      24
-    glow: f32;              // 4      4
-    image: i32;             // 4      4
-    inner_color: vec4<f32>; // 16     16
-    outer_color: vec4<f32>; // 16     16
+    xform: PackedMat3x2,    // 8      24
+    glow: f32,              // 4      4
+    image: i32,             // 4      4
+    inner_color: vec4<f32>, // 16     16
+    outer_color: vec4<f32>, // 16     16
 };
 
 struct Paints {
-    paints: array<Paint>;
+    paints: array<Paint>,
 };
 
-[[group(0), binding(3)]]
+@group(0)
+@binding(3)
 var<storage> paints: Paints;
 
 fn apply(paint: Paint, p: vec2<f32>) -> vec4<f32> {
@@ -556,29 +572,60 @@ fn apply(paint: Paint, p: vec2<f32>) -> vec4<f32> {
     return mix(paint.inner_color, paint.outer_color, d);
 }
 
-[[group(1), binding(1)]]
+struct Scissor {
+    xform: PackedMat3x2,
+    origin: vec2<f32>,
+    size: vec2<f32>,
+};
+
+struct Scissors {
+    scissors: array<Scissor>,
+};
+
+@group(0)
+@binding(4)
+var<storage> scissors: Scissors;
+
+fn scissor_mask(scissor: Scissor, p: vec2<f32>) -> f32 {
+    let M = unpack_mat3x2(scissor.xform);
+    let pp = (M * vec3<f32>(p, 1.0)).xy;
+    let center = scissor.origin + 0.5 * scissor.size;
+    let size = scissor.size;
+    if sdBox(pp - center, 0.5 * size, 0.0) < 0.0 {
+        return 1.0;
+    } else {
+        return 0.0;
+    }
+}
+
+@group(1)
+@binding(1)
 var glyph_atlas: texture_2d<f32>;
 
-[[group(1), binding(2)]]
+@group(1)
+@binding(2)
 var samp : sampler;
 
-[[stage(fragment)]]
+@fragment
 fn fs_main(
     in: VertexOutput,
-) -> [[location(0)]] vec4<f32> {
+) -> @location(0) vec4<f32> {
 
     let fw = length(fwidth(in.t));
     let prim = prims.prims[in.prim_index];
     let paint = paints.paints[prim.paint];
+    let scissor = scissors.scissors[prim.scissor];
 
     // Look up glyph alpha (if not a glyph, still have to because of wgsl).
     let a = textureSample(glyph_atlas, samp, in.t/1024.0).r;
     // let a = textureLoad(glyph_atlas, vec2<i32>(in.t), 0).r;
 
+    let s = scissor_mask(scissor, in.p);
+
     if(prim.prim_type == 8u) { // vgerGlyph
 
         let c = paint.inner_color;
-        var color = vec4<f32>(c.rgb, a);                                
+        var color = vec4<f32>(c.rgb, a);
 
         //auto c = paint.innerColor;
         //auto color = float4(c.rgb, c.a * glyphs.sample(glyphSampler, in.t).a);
@@ -587,11 +634,11 @@ fn fs_main(
         //    color.a *= paint.glow;
         //}
 
-        return color;
+        return s * color;
     }
 
     let d = sdPrim(prim, in.t, fw);
     let color = apply(paint, in.t);
 
-    return mix(vec4<f32>(color.rgb,0.0), color, 1.0-smoothStep(-fw/2.0,fw/2.0,d) );
+    return s * mix(vec4<f32>(color.rgb,0.0), color, 1.0-smoothstep(-fw/2.0,fw/2.0,d) );
 }
